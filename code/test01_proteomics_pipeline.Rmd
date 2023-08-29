@@ -1,0 +1,1040 @@
+---
+title: "质谱-蛋白质组学分析报告"
+author: 
+- name: Biomedical Big Data Center
+  affiliation: 
+    - Biomedical big data center, the First Affiliated Hospital, Zhejiang University School of Medicine, 79 Qingchun Road, Hangzhou, 310003, Zhejiang, China. 
+    - Zhejiang Provincial Key Laboratory of Pancreatic Disease, Zhejiang University School of Medicine First Affiliated Hospital, Hangzhou, China. 
+    - Zhejiang University Cancer Center, Zhejiang University, Hangzhou, China.
+  email: zy_bmbdc@zju.edu.cn
+package: jhuanglabHyperion
+output:
+  BiocStyle::html_document:
+    toc_float: false
+    self_contained: false
+vignette: >
+  %\VignetteIndexEntry{1. An introduction to the jhuanglabHyperion toolkit}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{css, echo=FALSE}
+    body .main-container {
+      max-width: 100%;
+      width: 100% !important;
+    }
+    body {
+      max-width: 100% !important;
+    }
+    span.header-section-number {
+      float: left;
+      width: 50px;
+    }
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo=FALSE) 
+pkgs <- c("fs", "futile.logger", "configr", "stringr", "ggpubr", "ggthemes", 
+          "jhtools", "glue", "ggsci", "patchwork", "tidyverse", "dplyr", "DESeq2",
+          "DT", "EnhancedVolcano", "kableExtra", "jhuanglabRNAseq", "readxl", "enrichplot","org.Mm.eg.db", "org.Hs.eg.db", "clusterProfiler", "ggExtra","reshape2", "EnhancedVolcano", "ComplexHeatmap","circlize", "KEGGREST", "png", "knitr", "cowplot",
+          "ggforce", "FactoMineR", "factoextra", "RColorBrewer")
+
+for (pkg in pkgs){
+  suppressPackageStartupMessages(library(pkg, character.only = T))
+}
+```
+
+
+```{r include=FALSE}
+directory <- "~/projects/proteomics/data/hongzhengtao/human/protein/G1_vs_S_vs_G2M/MSB230410LQ/txt"
+Sys.setenv(DIR = directory)
+peptidegroups <- glue("{directory}/MSB230410LQ_PeptideGroups.txt")
+spectruminfo <- glue("{directory}/MSB230410LQ_MSMSSpectrumInfo.txt")
+proteins <- glue("{directory}/MSB230410LQ_Proteins.txt")
+psm <- glue("{directory}/MSB230410LQ_PSMs.txt")
+results <- glue("{directory}/MSB230410LQ_ResultStatistics.txt")
+metadata <- glue("{directory}/MSB230410LQ_InputFiles.txt")
+outdir <- glue("~/projects/proteomics/analysis/hongzhengtao/human/protein/res")
+```
+
+# 蛋白质鉴定总览
+为了得到高质量的分析结果，搜库分析结果需要做进一步的数据过滤。在谱图、肽段、蛋白三个层面鉴定的准确性FDR 设定为1%；鉴定蛋白至少需要包含一个特异性（unique）肽段。下表是搜库结果经过数据过滤后的鉴定的肽段和蛋白数总体情况:  
+
+```{r identifications-overview, echo=FALSE, message=FALSE, warning=FALSE}
+outdir %>% fs::dir_create()
+peptidegroups <- read_tsv(peptidegroups)
+spectruminfo <- read_tsv(spectruminfo)
+proteins <- read_tsv(proteins) 
+psm <- read_tsv(psm)
+results <- read_tsv(results)
+metadata <- read_tsv(metadata) 
+
+total_spectrum <- nrow(spectruminfo)
+matched_spectrum <- nrow(psm)
+peptide <- nrow(peptidegroups)
+unique_peptide <- sum(proteins$`# Unique Peptides`)
+proteins <- proteins[!str_detect(proteins$Accession, pattern = "CON_"),] # filter out contaminated proteins
+identified_proteins <- nrow(proteins)
+
+check <- proteins %>% dplyr::select(starts_with("Abundances (Grouped):")) %>% apply(2,is.na) %>% as.data.frame() %>% rowSums()
+row_idx <- which(check > 0)
+
+quantifiable_proteins <- nrow(proteins)-length(row_idx)
+data <- data.frame(Title = c("Total spectrums", "Matched spectrums", "Peptides", "Unique peptides", "Identified proteins", "Quantifiable Proteins"),
+                   Number = c(total_spectrum, matched_spectrum, peptide, unique_peptide, identified_proteins, quantifiable_proteins))
+write_tsv(data, glue("{outdir}/protein_identification_overview.tsv"))
+data %>% kbl(caption = "表1：蛋白质鉴定总览") %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  column_spec(2, width = "10em")
+```
+
+
+表头说明：1. Total spectrums：总谱图数，质谱检测产生的二级谱图数；2. Matched spectrums：有效谱图数，与理论二级谱图匹配的谱图数；3.Peptides：鉴定肽段数，匹配结果解析出的肽段序列数；4. Unique peptides：鉴定unique 肽段数，匹配结果解析出的unique 肽段序列数；5. Identified proteins：鉴定蛋白数，通过特异性肽段解析出的蛋白数；6. Quantifiable proteins：定量蛋白数，通过特异性肽段定量到的蛋白数。  
+
+
+```{r number-of-identified-proteins, echo=FALSE, out.width="80%", fig.align = 'center'}
+
+color <- c("#E54C35", "#4DBBD5", "#01A085", "#375789", "#F29B7F", "#8290B4")
+p <- ggbarplot(data, 'Title', 'Number', xlab = "", ylab = "", fill = 'Title', width = 0.5,
+               palette = color, label = T, label.pos = "out", ylim = c(0, max(data$Number)*1.1))  + 
+  scale_y_discrete(expand = c(0, 0))
+p1 <- ggpar(p, x.text.angle = 45) + rremove('legend')
+png(glue("{outdir}/number_identified_proteins.png"))
+print(p1)
+dev.off()
+knitr::include_graphics(path = glue("{outdir}/number_identified_proteins.png"))
+```
+
+# 数据质控
+
+质谱下机的数据，在搜库完成后，需要进行一系列质控评价，保证结果质量符合标准：包括肽段长度分布、肽段数量分布、蛋白覆盖度分布、蛋白分子量分布。
+
+## 肽段长度分布
+
+大部分肽段分布在7-20 个氨基酸，符合基于酶解和质谱碎裂方式的一般规律。质谱鉴定到的肽段长度分布符合质控要求。
+
+```{r peptide-lengths, echo=FALSE, out.width="80%", fig.align = 'center'}
+peptide_length <- psm$`Annotated Sequence` %>% strsplit(split= ".", fixed = T) %>% lapply(function(x){return(x[2])}) %>% unlist() %>% nchar()
+mz <- psm$`m/z [Da]`
+charge <- psm$Charge
+data2 <- data.frame(peptide_length = peptide_length, mz = mz, charge = charge)
+p <- ggplot(data2, aes(x = peptide_length, y = mz, color = factor(charge))) + geom_point() + xlab("Peptide length") + ylab("m.z") + theme_classic() + labs(color='Charge') 
+ggMarginal(p, type = "histogram", groupFill = T, xparams = list(binwidth = 1))
+```
+
+## 肽段数量分布
+
+大部分蛋白对应两个以上肽段。在定量时，一个蛋白对应多个特异性肽段（或对应多张谱图）有利于增加定量结果的精确性和可信性。
+
+```{r peptide-number, echo=FALSE, warning=FALSE, out.width="80%", fig.align = 'center'}
+pep_per_protein <- proteins$`# Peptides`
+tab <- table(pep_per_protein)
+over20_num <- tab[tab %>% names() %>% as.numeric(.) > 20] %>% sum()
+less20_tab <- tab[tab %>% names() %>% as.numeric() <= 20]
+
+data3 <- data.frame(pep_per_protein = c(names(less20_tab), ">20"), number = c(less20_tab,
+                                                                              over20_num))
+ggbarplot(data3, x = "pep_per_protein", y = "number", xlab = "Peptides per protein", ylab = "Number", fill = "#1ABC9A") + scale_y_continuous(limits = c(0, 1.1*max(data3$number)), expand = c(0, 0))
+```
+
+## 蛋白覆盖度分布
+
+大部分蛋白的覆盖度在30%以下。在基于shotgun（也叫bottom-up）策略的质谱分析方法中，质谱优先扫描丰度较高的肽段。因此，蛋白的覆盖率和在样品中的丰度成正相关关系。
+
+```{r protein-coverage, echo=FALSE, out.width="60%", fig.align = 'center'}
+coverage <- proteins$`Coverage [%]`
+cvg_cls <- coverage %/% 10 %>% as.character() %>% fct() %>% 
+  forcats::fct_collapse("40% ~ 50%" = "4", "30% ~ 40%" = "3", "20% ~ 30%" = "2", 
+                        "10% ~ 20%" = "1", "0% ~ 10%" = "0", other_level = ">= 50%") %>% 
+  forcats::fct_relevel(">= 50%", after = 0)
+data4 <- data.frame(coverage = coverage, class = cvg_cls) %>% 
+  group_by(class) %>% summarise(count = n()) 
+png(glue("{outdir}/protein_coverage_pie.png"))
+ggpie(data4, "count", fill = 'class', color = "white", label = "count",
+           legend = "right", lab.pos = "in", legend.title = "Coverage")
+dev.off()
+knitr::include_graphics(glue("{outdir}/protein_coverage_pie.png"))
+```
+
+## 蛋白分子量分布
+
+鉴定蛋白的分子量在不同阶段均有，且分布均匀。
+
+```{r protein-molecular-weights, echo=FALSE, out.width="80%", fig.align = 'center'}
+mass <- proteins$`MW [kDa]`
+class <- vector("character", length(mass))
+mass_cls <- mass %/% 10 %>% as.character() %>% fct() %>% 
+  forcats::fct_collapse("190 ~ 200kDa" = "19", "180 ~ 190kDa" = "18", "170 ~ 180kDa" = "17", "160 ~ 170kDa" = "16", 
+                        "150 ~ 160kDa" = "15", "140 ~ 150kDa" = "14", "130 ~ 140kDa" = "13", "120 ~ 130kDa" = "12", 
+                        "110 ~ 120kDa" = "11", "100 ~ 110kDa" = "10", "90 ~ 100kDa" = "9", "80 ~ 90kDa" = "8", "70 ~ 80kDa" = "7", 
+                        "60 ~ 70kDa" = "6", "50 ~ 60kDa" = "5", "40 ~ 50kDa" = "4", "30 ~ 40kDa" = "3", "20 ~ 30kDa" = "2", 
+                        "10 ~ 20kDa" = "1", "0 ~ 10kDa" = "0", other_level = ">= 200kDa") %>% 
+  forcats::fct_relevel("0 ~ 10kDa", "10 ~ 20kDa", "20 ~ 30kDa", "30 ~ 40kDa", "40 ~ 50kDa", "50 ~ 60kDa", "60 ~ 70kDa", "70 ~ 80kDa", "80 ~ 90kDa", 
+                       "90 ~ 100kDa", "100 ~ 110kDa", "110 ~ 120kDa", "120 ~ 130kDa", "130 ~ 140kDa", "140 ~ 150kDa", "150 ~ 160kDa", "160 ~ 170kDa", 
+                       "170 ~ 180kDa", "180 ~ 190kDa", "190 ~ 200kDa", ">= 200kDa")
+data5 <- tibble::tibble(mass = mass, class = mass_cls) %>% 
+  group_by(class) %>% summarise(count = n())
+p <- ggbarplot(data5, x = "class", y = "count", fill = "#4BBBD5", xlab = "Mass", ylab = "Number") + 
+  scale_y_continuous(limits = c(0, 1.1*max(data5$count)), expand = c(0, 0))
+p5 <- ggpar(p, x.text.angle = 45)
+ggsave(glue("{outdir}/protein_mass.pdf"), p5)
+p5
+
+```
+
+# 蛋白功能注释
+
+为了透彻了解不同蛋白质的功能特性，我们对鉴定到的蛋白质进行全方位的功能注释。包含基因本体论（Gene Ontology，GO）、蛋白结构域（Protein domain）、KEGG通路、COG/KOG功能分类以及亚细胞结构定位（Subcellular localization）等方面进行了详细的注释。
+
+```{bash emapper, eval = FALSE,include=FALSE}
+export PATH="/cluster/home/yliang_jh/.conda/envs/liang/bin:$PATH"
+cd $DIR
+/cluster/home/yliang_jh/.conda/envs/liang/bin/emapper.py -i *.fasta -o protein --cpu 20 --outfmt_short --override
+```
+
+```{r functional-annotation, echo=FALSE, fig.align="center", message=FALSE, warning=FALSE, out.width="80%"}
+annotation <- read_tsv(glue("{directory}/protein.emapper.annotations"), comment = "#", col_names = F)
+colnames(annotation) <- c("query", "seed_ortholog", "evalue", "score", "eggNOG_OGs",
+                          "max_annot_lvl", "COG_category", "Description", "Preferred_name",
+                          "GOs", "EC", "KEGG_ko", "KEGG_Pathway", "KEGG_Module", "KEGG_Reaction", 
+                          "KEGG_rclass", "BRITE", "KEGG_TC", "CAZy", "BiGG_Reaction", "PFAMs")
+annotation = annotation[annotation$query %in% proteins$Accession,]
+
+# split strings in columns below
+annot_idx <- which(colnames(annotation) %in% c("GOs", "KEGG_ko", "KEGG_Pathway", "KEGG_Module", "KEGG_Reaction", 
+                                               "KEGG_rclass", "BRITE", "KEGG_TC", "CAZy", "BiGG_Reaction", "PFAMs"))
+for(idx in annot_idx){
+  annotation[, idx] <- stringr::str_split(annotation[, idx], ",")
+}
+
+for(i in 1:nrow(annotation)){
+  if(annotation$eggNOG_OGs[[i]] %>% str_detect(pattern = annotation$max_annot_lvl[i]) %>% sum() != 0){
+    annotation$best_COG[i] <- annotation$eggNOG_OGs[[i]][annotation$eggNOG_OGs[[i]] %>% str_detect(pattern = annotation$max_annot_lvl[i])]
+  } else {
+    annotation$best_COG[i] <- "-"
+  }
+}
+
+# calculate sums of each unique term
+# system.time({
+  annot_num_lst <- parallel::mclapply(c("GOs", "KEGG_ko", "KEGG_Pathway", "KEGG_Module", 
+                                        "KEGG_Reaction", "KEGG_rclass", "BRITE", "PFAMs", "best_COG"), \(idx){
+    annotation[[idx]] %>% purrr::reduce(.f = union) %>% length()
+  }, mc.cores = length(annot_idx))
+# })
+n_kegg <- annot_num_lst[2:7] %>% unlist() %>% sum()
+dt <- data.frame(COG_KOG = annot_num_lst[[9]], GO = annot_num_lst[[1]], KEGG = n_kegg, Pfam = annot_num_lst[[8]]) %>%
+  pivot_longer(values_to = 'number', cols = everything())
+
+p6 <- ggbarplot(dt, x = "name", y = "number", label = T, fill = "name", ylab = "count", xlab = "", width = 0.5) + 
+  rremove("legend") + scale_y_continuous(limits = c(0, 1.1*max(dt$number)), expand = c(0, 0))
+ggsave(glue("{outdir}/func_annotation.pdf"), p6)
+p6
+```
+
+# 定量分析
+
+搜库结果中给出了每个蛋白在不同样本中的LFQ intensity（蛋白原始Intensity值在样本之间校正后的结果）。将蛋白在不同样本中的LFQ intensity（I）通过中心化变换，得到蛋白在不同样本中的相对定量值（R）。计算公式如下：其中i表示样本，j 表示蛋白。 
+Rij = Iij / Mean(Ij)
+
+## 样品重复性检验
+
+对于生物重复或技术重复样本，需要检验生物重复或技术重复样本的定量结果是否符合统计学上的一致性。这里分别采用了皮尔森相关性（Pearson’s Correlation Coefficient, PCC）、主成分分析（PCA）和相对标准差（RSD）三种统计分析方法评估重复性。
+
+###   PCC
+
+所有样本两两之间的皮尔森相关系数绘制的热图。此系数用于度量两组数据的线性相关程度：皮尔森相关系数接近-1 为负相关，接近1 为正相关，接近0 为不相关。
+
+```{r PCC, echo=FALSE, out.width="60%", fig.align = 'center'}
+pro_dat <- proteins %>% dplyr::select(starts_with("Abundances (Grouped):")) 
+pro_dat <- pro_dat[-row_idx,]
+rowmean <- rowMeans(pro_dat, na.rm = T)
+
+for (i in 1:length(rowmean)){
+  pro_dat[i,] <- pro_dat[i,]/rowmean[i]
+}
+colnames(pro_dat) <- metadata$`File Name`
+pro_dat <- as.data.frame(pro_dat)
+rownames(pro_dat) <- proteins$Accession[-row_idx]
+log <- log2(pro_dat)
+cormat <- log %>% cor(method = "pearson")
+melted_cormat <- melt(cormat)
+
+ggplot(data = melted_cormat, aes(x= Var1, y = ordered(Var2, levels=rev(sort(unique(Var2)))), fill=value)) + 
+  geom_tile(color = "white") + 
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1,1), space = "Lab", name="Pearson\nCorrelation") + 
+  theme_minimal() + theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1), axis.title.x = element_blank(), axis.title.y = element_blank()) + 
+  coord_fixed() + geom_text(aes(Var2, Var1, label = round(value, digits = 3)), color = "black", size = 4)
+```
+
+###   PCA
+
+所有样本的蛋白定量主成分分析结果展示图，图中样本间的聚集程度代表样本的差异性大小。
+
+```{r PCA, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%", fig.align = 'center'}
+df_pca <- pro_dat %>% dplyr::select(metadata$`File Name`) %>% t() %>% as.data.frame()
+df_pca$group <- str_extract(metadata$`File Name`, "[A-Za-z]+")
+pca <- PCA(df_pca[,-ncol(df_pca)], graph = FALSE)
+theme<-theme(panel.background = element_blank(),panel.border=element_rect(fill=NA),panel.grid.major = element_blank(),panel.grid.minor = element_blank(),
+             strip.background=element_blank(),axis.text.x=element_text(colour="black"),axis.text.y=element_text(colour="black"),axis.ticks=element_line(colour="black"),plot.margin=unit(c(1,1,1,1),"line"))
+fviz_pca_ind(pca,
+             geom.ind="point",
+             label = "none", 
+             habillage = as.factor(df_pca$group),
+             alpha.ind = 1, 
+             palette = c("#00AFBB", "#E7B800"),
+             invisible='quali',
+             addEllipses = TRUE # Concentration ellipses
+             ) + ggforce::geom_mark_ellipse(aes(fill = Groups,
+                        color = Groups)) +
+  theme(legend.position = 'right') + 
+  coord_equal() + scale_x_continuous(limits = c(-100,100)) +
+  scale_y_continuous(limits = c(-100,100)) + theme 
+```
+
+###   RSD
+
+各组重复样本间蛋白定量值的相对标准差（RSD）绘制的箱线图，整体RSD 值越小，定量重复性越好。
+
+```{r RSD, echo=FALSE, out.width="60%", fig.align = 'center', fig.height=8}
+df_rsd <- pro_dat %>% dplyr::select(metadata$`File Name`) %>% t()
+rsd <- vector("numeric", length = ncol(t(df_rsd)))
+for (i in 1:nrow(df_rsd)){
+  rsd[i] <- sd(df_rsd[i,])/mean(df_rsd[i,])
+}
+ rsd_dat <- data.frame(sample = str_extract(metadata$`File Name`, "[A-Za-z]+"), 
+                       RSD = rsd)
+# rsd_dat <- data.frame(sample = str_remove(metadata$`File Name`, "-[1,2,3]"), RSD = rsd)
+p <- ggboxplot(rsd_dat, x = "sample", y = "RSD", fill = "sample", width = 0.5)
+ggpar(p, ylim = c(0.9*min(rsd_dat$RSD), 1.4*max(rsd_dat$RSD)))
+```
+
+## 差异蛋白筛选
+
+三次重复及以上：首先挑出需要比较的样本，将每个蛋白在多次重复样本中的相对定量值均值之比作为差异倍数（Fold Change，FC）。
+例如计算样本分组A 与样本分组B 之间蛋白的差异倍数。计算公式如下：其中R 表示蛋白相对定量值，i 表示样本，k 表示蛋白。
+FCA/B,k = Mean(Rik, i∈A) / Mean(Rik, i∈B)
+为了判断差异的显著性，将每个蛋白在比较组样本中的相对定量值进行T 检验，计算相应的P value，以此作为显著性指标，默认P value
+< 0.05。为了让检验数据符合T 检验需求的正态分布。检验前，蛋白相对定量值需要经过Log2 对数转换。计算公式如下：
+Pik = T.test(Log2(Rik, i∈A), Log2(Rik, i∈B))
+两次重复：首先挑出需要比较的样本，将每个蛋白在两次重复比较组中的相对定量值均值作为差异倍数（Fold Change，FC）。例如计算样本分组A 与样本分组B 之间蛋白差异倍数。计算公式如下：其中R 表示蛋白相对定量值，i 表示样本，k 表示蛋白。
+FCA/B,k = Mean((Rik, i∈A) / (Rik, i∈B))
+为了判断差异的显著性，计算每个蛋白在两个比较组中的标准变异系数（CV）作为显著性指标，默认CV <0.1。计算公式如下：
+CV = SD(A1k/B1k, A2k/B2k) / Mean(A1k/B1k, A2k/B2k)
+无重复：首先挑出需要比较的样本，将每个蛋白在样本中的相对定量值之比作为差异倍数（Fold Change，FC）。例如计算样本A 与样本B 之间蛋白的差异倍数。计算公式如下：其中R 表示蛋白相对定量值，k 表示蛋白。
+FCA/B,k = RAk / RBk
+通过上述差异分析，当P value < 0.05 或CV < 0.1 时，以差异表达量变化超过1.5 作为显著上调的变化阈值，小于1/1.5 作为显著下调的变化阈值。
+
+###   差异蛋白统计图
+
+```{r differential-proteins, echo=FALSE, out.width="80%", fig.align = 'center'}
+metadata$group <- str_extract(metadata$`File Name`, "[A-Za-z]+")
+n_replicates <- nrow(metadata)/length(unique(metadata$group))
+
+if(n_replicates >= 3){
+  group1 <- metadata$group %>% unique() %>% .[1]
+  group2 <- metadata$group %>% unique() %>% .[2]
+  mean1 <- pro_dat %>% dplyr::select(metadata$`File Name`[metadata$group == group1]) %>% rowMeans()
+  mean2 <- pro_dat %>% dplyr::select(metadata$`File Name`[metadata$group == group2]) %>% rowMeans()
+  pro_dat$FC <- mean1/mean2
+  log_diff_dat <- log2(pro_dat)[,-ncol(pro_dat)]
+  p <- vector("numeric", nrow(log_diff_dat))
+  log_dat1 <- log_diff_dat %>% dplyr::select(metadata$`File Name`[metadata$group == group1])
+  log_dat2 <- log_diff_dat %>% dplyr::select(metadata$`File Name`[metadata$group == group2])
+  for(i in 1:nrow(log_diff_dat)){
+    p[i] <- t.test(log_dat1[i,], log_dat2[i,])$p.value
+  }
+  pro_dat$p_value <- p
+}
+diff_dat_all <- pro_dat
+diff_dat <- pro_dat %>% dplyr::filter(p_value < 0.05 & (FC > 1.5 | FC < 1/1.5)) # change
+up_dat <- diff_dat %>% filter(FC > 1.5) 
+down_dat <- diff_dat %>% filter(FC < 1/1.5)
+n_up <- up_dat %>% nrow()
+n_down <- down_dat %>% nrow()
+hist_dat <- data.frame(up = n_up, down = n_down) %>% pivot_longer(cols = c('up', 'down'))
+hist_dat$group <- glue("{group1}/{group2}")
+ggplot(hist_dat, aes(x = group, y = value, fill = name)) + geom_bar( color = "black", position="dodge", width=0.2, stat="identity") + theme_classic() + geom_text(
+    aes(label = value), colour = "black", size = 5, vjust = -0.1, position = position_dodge(.2)) + scale_fill_manual("Type", values = c("down" = "#1A9D78", "up" = "#D85F01"), labels = c("Down_regulated", "Up_regulated")) + xlab("Compared group") +
+  ylab('Number') + scale_y_continuous(limits = c(0, 1.07*max(hist_dat$value)), expand = c(0,0))
+```
+
+###   差异蛋白火山图
+
+```{r volcano-plot, echo=FALSE, out.width="80%", fig.align = 'center'}
+vol_dat <- diff_dat_all %>% mutate(log2FC = log2(FC)) %>% mutate(logp = -log10(p_value)) 
+vol_dat$Regulated.Type <- "None"
+vol_dat$Regulated.Type[vol_dat$p_value < 0.05 & vol_dat$FC > 1.5] <- "Up"
+vol_dat$Regulated.Type[vol_dat$p_value < 0.05 & vol_dat$FC < 1/1.5] <- "Down"
+ggplot(vol_dat, aes(x=log2FC, y=logp, col=Regulated.Type)) + geom_point() + theme_classic() + scale_color_manual(values=c("#47C79C", "#BEBEBE", "#FF8364")) + ylab("-log10 P Value") + xlab(glue("log2 {group1}/{group2}")) + scale_y_continuous(limits = c(0,1.1*max(vol_dat$logp)), expand = c(0, 0))
+```
+
+###   差异蛋白热图
+
+```{r differential-protein-heatmap, echo=FALSE, fig.align="center", message=FALSE, warning=FALSE, out.width="60%"}
+h_dat <- diff_dat %>% dplyr::select(metadata$`File Name`)
+col_fun = colorRamp2(seq(min(h_dat), median(as.matrix(h_dat))*2, length = 3), c("#6DBFA4", "#FDFFFE", "#FA8A77"))
+Heatmap(h_dat, show_row_names = F, cluster_columns = F, name = " ", col = col_fun,
+        height = unit(8, "cm"), width = unit(4, "cm"))
+```
+
+###   差异蛋白功能分类
+
+Gene Ontology（GO）即基因本体论，是一个重要的生物信息学分析方法和工具，用于表述基因和基因产物的各种属性。GO 注释分为3 大类：生物过程（Biological Process），细胞组分（Cellular Component）和分子功能（Molecular Function），从不同角度阐释蛋白的生物学作用。我们将GO分类中的三大类分别取level = 2并进行了差异蛋白富集分析。
+
+```{r differential-proteins-categories, echo=FALSE, fig.align="center", message=FALSE, warning=FALSE, out.width="100%"}
+annotation$query <- annotation$query %>% strsplit(split = "|", fixed = T) %>% sapply(FUN = '[', 1)
+fil <- annotation$query %in% rownames(diff_dat)
+annotation <- annotation[fil,]
+dt <- vector("list", nrow(annotation))
+goid <- vector("list", nrow(annotation))
+proid <- vector("character", nrow(annotation))
+for (i in 1:nrow(annotation)){
+  goid[[i]] <- annotation$GOs[[i]]
+  proid[i] <- annotation$query[i]
+  dt[[i]] <- data.frame(goid = goid[[i]], proid = proid[i]) 
+}
+term2pro <- Reduce(f = bind_rows, x = dt)
+go2ont <- read_tsv("/cluster/home/yliang_jh/projects/kpc/proteomics/04.enrichment/go_all_level.tsv", show_col_types = FALSE)
+colnames(go2ont)[1] <- "goid"
+term2pro <- left_join(term2pro, go2ont, by = "goid")
+term2pro_bp <- term2pro %>% dplyr::filter(ONTOLOGY == "BP")
+term2pro_bp_lv2 <- term2pro_bp %>% filter(level == 2)
+term2pro_cc <- term2pro %>% dplyr::filter(ONTOLOGY == "CC")
+term2pro_cc_lv2 <- term2pro_cc %>% filter(level == 2)
+term2pro_mf <- term2pro %>% dplyr::filter(ONTOLOGY == "MF")
+term2pro_mf_lv2 <- term2pro_mf %>% filter(level == 2)
+
+bp_dat <- term2pro_bp_lv2 %>% group_by(goid) %>% mutate(n= n()) %>% 
+     distinct(goid, .keep_all=TRUE) %>% arrange(desc(n))
+
+cc_dat <- term2pro_cc_lv2 %>% group_by(goid) %>% mutate(n= n()) %>% 
+     distinct(goid, .keep_all=TRUE) %>% arrange(desc(n))
+
+mf_dat <- term2pro_mf_lv2 %>% group_by(goid) %>% mutate(n= n()) %>% 
+     distinct(goid, .keep_all=TRUE) %>% arrange(desc(n))
+
+if(nrow(bp_dat) > 10) bp_dat <- bp_dat[1:10,]
+if(nrow(cc_dat) > 10) cc_dat <- cc_dat[1:10,]
+if(nrow(mf_dat) > 10) mf_dat <- mf_dat[1:10,]
+
+barplot_dat <- bind_rows(bp_dat,cc_dat,mf_dat) %>% group_by(ONTOLOGY)
+p <- ggbarplot(barplot_dat, x = "TERM", y = "n", fill = "ONTOLOGY", 
+               label = T, lab.pos = "out", lab.size = 3, lab.hjust = -0.1, lab.vjust = 0.3,
+               sort.val = "asc", sort.by.groups = T) + 
+  rotate() + 
+  facet_grid(rows = vars(ONTOLOGY), scales ="free", space = "free") + 
+  theme_classic() + 
+  rremove("legend") + 
+  scale_y_continuous(limits = c(0, 1.1*max(barplot_dat$n)), expand = c(0, 0))
+
+ggpar(p, ylab = "Number of proteins", xlab = "GO terms name") 
+```
+
+COG，即Clusters of Orthologous Groups of  proteins。构成每个COG的蛋白都是被假定为来自于一个祖先蛋白，Orthologs是指来自于不同物种、由垂直家系（物种形成）进化而来的蛋白，并且典型的保留与原始蛋白相同的功能。COG的中文释义即“同源蛋白簇”。COG分为两类，一类是原核生物，另一类是真核生物。原核生物的一般称为COG数据库；真核生物的一般称为KOG数据库。我们通过数据库比对，将差异表达蛋白进行了COG/KOG 功能分类统计。
+
+```{r COG, echo=FALSE, out.width="100%", fig.align = 'center'}
+for(i in 1:nrow(annotation)){
+  annotation$COG_category[i] <- strsplit(as.character(annotation$COG_category[i]), split = "")
+}
+
+cog <- vector("list", length = nrow(annotation))
+proid <- vector("character", length = nrow(annotation))
+dt <- vector("list", nrow(annotation))
+
+for (i in 1:nrow(annotation)){
+  cog[[i]] <- annotation$COG_category[[i]]
+  proid[i] <- annotation$query[i]
+  dt[[i]] <- data.frame(cog = cog[[i]], proid = proid[i]) 
+}
+cog2pro <- Reduce(f = bind_rows, x = dt)
+cog_per_pro <- cog2pro %>% group_by(cog) %>% summarise(n = n()) %>% .[-1,] %>% arrange(desc(n))
+cog_info <- read_tsv("/cluster/home/flora_jh/projects/proteomics/data/cog_info", show_col_types = FALSE)
+cog_dat <- left_join(cog_per_pro, cog_info, by = "cog")
+ymax <- max(cog_dat$n * 1.1)
+p <- ggbarplot(cog_dat, x = "description", y = "n", label = T,fill = "category",
+          sort.val = "asc", sort.by.groups = T, lab.pos = "out", lab.size = 2.5, lab.hjust = -0.2, lab.vjust = 0.5) + facet_grid(scales ="free") + theme_classic() +
+  scale_y_continuous(limits = c(0, 1.2*max(cog_dat$n)), expand = c(0, 0))
+ggpar(p, ylab = "Number of proteins", xlab = "", legend = "right", font.legend = c(6),
+      font.tickslab = c(8), legend.title = list(shape = "category"), rotate = T)
+```
+
+真核生物组织细胞中的蛋白，依据与其结合的膜结构的差异，被定位到细胞内的各种元件上。基于此，我们使用WolF Psort 软件对蛋白进行亚细胞结构注释。此处我们只注释**动物**蛋白。
+
+```{bash eval=FALSE, include=FALSE}
+cd /cluster/home/flora_jh/projects/proteomics/analysis/WoLFPSort/bin
+cat $DIR/*.fasta | ./runWolfPsortSummary "animal" > $DIR/summary.csv
+```
+
+```{r distribution-of-protein-locations, echo=FALSE, out.width="80%", fig.align = 'center'}
+loc <- read_csv(glue("{directory}/summary.csv"),
+                comment = "#", col_names = F, show_col_types = FALSE)
+loc$query <- loc$X1 %>% strsplit(split = " ") %>% lapply(function(x){return(x[1])}) %>% unlist()
+loc <- loc[loc$query %in% proteins$Accession,] %>% relocate(query, everything())
+loc$X1 <- loc$X1 %>% strsplit(split = " ") %>% lapply(function(x){return(x[2])}) %>% unlist()
+loc_dat <- loc %>% dplyr::select(query, X1) %>% dplyr::rename(abbr.=X1) %>% group_by(abbr.) %>% summarise(n = n()) 
+other_sum <- sum(loc_dat$n[loc_dat$n <= 0.01*sum(loc_dat$n)])
+loc_dat <- loc_dat %>% filter(n >= 0.01*sum(loc_dat$n)) %>% add_row(abbr. = "other", n = other_sum) %>% mutate(percent = round(100*n/sum(n),2)) %>% mutate(percent = paste(percent, "%", sep = "")) %>% mutate(percent = paste(abbr., percent, sep = ":"))
+ggpie(loc_dat, x="n", fill = "percent", color = "white", lab.pos = "out",
+      lab.adjust = 5, lab.font = c(4), legend = "right") 
+```
+
+## 差异表达蛋白功能富集分析
+
+我们对各比较组中的差异表达蛋白分别进行了GO分类、KEGG通路和蛋白结构域三个层面的富集分析（此处运用Fisher’s exact test,即费希尔精确检验计算显著性P value），目的是发现差异表达蛋白是否在某些功能类型有显著性的富集趋势。通过气泡图的方式展现
+差异表达蛋白显著富集（P value < 0.05）到的功能分类和通路。气泡图中给出了最显著富集的前20 个分类的结果，纵轴为功能分类或通路，横轴为差异表达蛋白在该功能类型中所占比例相比于鉴定蛋白所占比例的变化倍数（Fold enrichment）的Log2 转换后的数值。圆圈颜色表示富集显著性P value，圆圈大小表示功能类或通路中的差异蛋白个数。
+
+### GO 富集
+
+Gene Ontology（GO）即基因本体论，是一个重要的生物信息学分析方法和工具，用于表述基因和基因产物的各种属性。GO 注释分为3 大类：生物过程（Biological Process），细胞组分（Cellular Component）和分子功能（Molecular Function），从不同角度阐释蛋白的生物学作用。我们将GO 分类中的三大类分别进行了差异蛋白富集分析。
+
+```{r include=FALSE}
+diffpros <- rownames(diff_dat)
+ego_bp <- enricher(
+  diffpros,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_bp[,1:2],
+  TERM2NAME = term2pro_bp[,c(1,4)]
+)
+
+ego_cc <- enricher(
+  diffpros,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_cc[,1:2],
+  TERM2NAME = term2pro_cc[,c(1,4)]
+)
+
+ego_mf <- enricher(
+  diffpros,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_mf[,1:2],
+  TERM2NAME = term2pro_mf[,c(1,4)]
+)
+
+bp <- ego_bp@result %>% dplyr::filter(pvalue < 0.05) %>% dplyr::select(GeneRatio, BgRatio, Description, Count, pvalue)
+cc <- ego_cc@result %>% dplyr::filter(pvalue < 0.05) %>% dplyr::select(GeneRatio, BgRatio, Description, Count, pvalue) 
+mf <- ego_mf@result %>% dplyr::filter(pvalue < 0.05) %>% dplyr::select(GeneRatio, BgRatio, Description, Count, pvalue) 
+```
+
+
+```{r include=FALSE}
+bp$BgRatio <- sapply(bp$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+bp$GeneRatio <- sapply(bp$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+bp <- bp %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+if(nrow(bp) > 10) bp <- bp[1:10,]
+p1 <- ggdotchart(bp, x = "Description", y = "log2FoldEnrichment", rotate = T, 
+           color = "pvalue", size = "Count", sorting = "descending") + 
+  xlab(NULL) +
+  ggtitle("Biological Processes") + 
+  font("xy.text", size = 8) + 
+  scale_color_gradient(low="#CE2C35", high="#457BBD") +
+  guides(size = guide_legend(order = 1))
+
+p1 <- ggpar(p1, legend = "right", legend.title = list(color = "P value", size = "Protein Number"))
+```
+
+
+```{r include=FALSE}
+cc$BgRatio <- sapply(cc$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+cc$GeneRatio <- sapply(cc$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+cc <- cc %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+if(nrow(cc) > 10) cc <- cc[1:10,]
+p2 <- ggdotchart(cc, x = "Description", y = "log2FoldEnrichment", rotate = T, 
+           color = "pvalue", size = "Count", sorting = "descending") + 
+  xlab(NULL) +
+  ggtitle("Cellular Component") + 
+  font("xy.text", size = 8) + 
+  scale_color_gradient(low="#CE2C35", high="#457BBD") +
+  guides(size = guide_legend(order = 1))
+
+p2 <- ggpar(p2, legend = "right", legend.title = list(color = "P value", size = "Protein Number"))
+```
+
+
+```{r GO-enrichment-plots, echo=FALSE, fig.align="left", fig.height=18, message=FALSE, warning=FALSE}
+mf$BgRatio <- sapply(mf$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+mf$GeneRatio <- sapply(mf$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+mf <- mf %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+if(nrow(mf) > 10) mf <- mf[1:10,]
+p3 <- ggdotchart(mf, x = "Description", y = "log2FoldEnrichment", rotate = T, 
+           color = "pvalue", size = "Count", sorting = "descending") + 
+  xlab(NULL) +
+  ggtitle("Molecular Functions") + 
+  font("xy.text", size = 8) + 
+  scale_color_gradient(low="#CE2C35", high="#457BBD") +
+  guides(size = guide_legend(order = 1))
+
+p3 <- ggpar(p3, legend = "right", legend.title = list(color = "P value", size = "Protein Number"))
+
+ggpubr::ggarrange(p1, p2, p3, heights = c(4, 4, 4), ncol = 1, align = "v")
+```
+
+### KEGG 通路富集
+
+KEGG 是连接已知分子间相互作用的信息网络，如代谢通路、复合物、生化反应等。KEGG通路主要包括：代谢、遗传信息处理、环境信息处理、细胞过程、人类疾病、药物开发等。
+
+```{r KEGG-enrichment-plot, echo=FALSE, fig.align="left", message=FALSE, warning=FALSE, out.width="100%"}
+kegg_info <- read_tsv("/cluster/home/yliang_jh/projects/kpc/proteomics/04.enrichment/ko00001.tsv", show_col_types = FALSE) %>% dplyr::rename(ID=level4_id) %>% dplyr::select(ID, level4_description) %>% distinct()
+
+dt_pathway <- vector("list", nrow(annotation))
+kegg_pathway <- vector("list", nrow(annotation))
+proid <- vector("character", nrow(annotation))
+for (i in 1:nrow(annotation)){
+  kegg_pathway[[i]] <- annotation$KEGG_Pathway[[i]]
+  proid[i] <- annotation$query[i]
+  dt_pathway[[i]] <- data.frame(kegg_pathway = kegg_pathway[[i]], proid = proid[i]) 
+}
+kegg_pathway2pro <- Reduce(f = bind_rows, x = dt_pathway) %>% filter(!kegg_pathway == "-") 
+kegg_pathway2pro <- kegg_pathway2pro[kegg_pathway2pro$kegg_pathway %>% str_detect("ko"),]
+
+kegg <- enricher(
+  diffpros,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = kegg_pathway2pro
+)
+
+kegg_res <- kegg@result %>% filter(pvalue < 0.05)
+if(nrow(kegg_res) >10) {
+  kegg_res <- kegg_res[1:10,]
+}
+
+kegg_res$BgRatio <- sapply(kegg_res$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_res$GeneRatio <- sapply(kegg_res$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_res <- kegg_res %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+kegg_info$ID <- str_c("hsa", kegg_info$ID, sep = "") 
+kegg_res$ID <- str_replace(kegg_res$ID, pattern = "ko", replacement = "hsa")
+kegg_res <- left_join(kegg_res, kegg_info, by = "ID") %>% filter(!is.na(level4_description))
+kegg_res$level4_description <- str_c(kegg_res$ID, kegg_res$level4_description, sep = " ")
+
+p <- ggdotchart(kegg_res, x = "level4_description", y = "log2FoldEnrichment", rotate = T, color = "pvalue", size = "Count", font.tickslab = c(12), sorting = "descending") + 
+  xlab(NULL) + 
+  font("xy.text", size = 8) + 
+  scale_color_gradient(low="#CE2C35", high="#457BBD") +
+  guides(size = guide_legend(order = 1))
+
+ggpar(p, legend = "right", legend.title = list(color = "P value", size = "Protein Number"))
+```
+
+
+### 蛋白结构域富集
+
+蛋白质结构域是指在不同蛋白质分子中重复出现的某些组分，具有相似的序列、结构和功能，是蛋白质进化的单元。结构域的长度通常在25 到500 个氨基酸长度之间。
+
+```{r protein-loci-enrichment-plot, echo=FALSE, fig.align="center", message=FALSE, warning=FALSE, out.width="100%"}
+dt <- vector("list", nrow(annotation))
+pfam <- vector("list", nrow(annotation))
+proid <- vector("character", nrow(annotation))
+for (i in 1:nrow(annotation)){
+  pfam[[i]] <- annotation$PFAMs[[i]]
+  proid[i] <- annotation$query[i]
+  dt[[i]] <- data.frame(pfam = pfam[[i]], proid = proid[i]) 
+}
+pfam2pro <- Reduce(f = bind_rows, x = dt)
+
+pfam <- enricher(
+  diffpros,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = pfam2pro
+)
+
+pfam_res <- pfam@result %>% filter(pvalue < 0.05)
+
+if(nrow(pfam_res) >10) {
+  pfam_res <- pfam_res[1:10,]
+}
+
+pfam_res$BgRatio <- sapply(pfam_res$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_res$GeneRatio <- sapply(pfam_res$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_res <- pfam_res %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+pfam_res$Count <- as.factor(pfam_res$Count)
+
+p <- ggdotchart(pfam_res, x = "ID", y = "log2FoldEnrichment", rotate = T, 
+           color = "pvalue", size = "Count", font.tickslab = c(12)) + 
+  xlab(NULL) + 
+  font("xy.text", size = 8) + 
+  scale_color_gradient(low="#CE2C35", high="#457BBD") +
+  guides(size = guide_legend(order = 1))
+
+ggpar(p, legend = "right", legend.title = list(color = "P value", size = "Protein Number"))
+
+```
+
+### KEGG 富集通路图
+对上述富集分析得到的KEGG通路通过网页形式进行了可视化展示,结果展示如下：
+
+```{r enriched-KEGG-pathways, echo=FALSE, message=FALSE, warning=FALSE}
+keggs <- kegg_res$Description
+out_png <- vector("character", length(keggs))
+
+for(i in 1:length(keggs)){
+   kegg <- keggs[i]
+   png <- keggGet(kegg, "image") 
+   out <- glue::glue("{directory}/{kegg}.png")
+   writePNG(png, out)
+   out_png[i] <- out
+}
+
+knitr::include_graphics(out_png)
+```
+
+## 聚类分析
+### 一个比较组
+将比较组中的差异表达蛋白进行GO分类、KEGG通路及蛋白结构域富集后，我们根据差异表达倍数（不做p值判断）进一步将其分成4个部分，称为Q1到Q4，如图所示。然后，对于每一个Q组分别进行GO分类、KEGG通路及蛋白结构域富集，并进行聚类分析，旨在找到比较组中不同差异表达倍数的蛋白功能的相关性。
+
+```{r clustering-overview, echo=FALSE, fig.align="center", out.width="80%"}
+Q1 <- diff_dat_all$FC[diff_dat_all$FC < 0.667 & diff_dat_all$p_value < 0.05] %>% length()
+Q2 <- diff_dat_all$FC[diff_dat_all$FC >= 0.667 & diff_dat_all$FC < 0.769 & diff_dat_all$p_value < 0.05] %>% length()
+Q3 <- diff_dat_all$FC[diff_dat_all$FC >= 1.3 & diff_dat_all$FC < 1.5 & diff_dat_all$p_value < 0.05] %>% length() 
+Q4 <- diff_dat_all$FC[diff_dat_all$FC >= 1.5 & diff_dat_all$p_value < 0.05] %>% length() 
+
+q_dat <- data.frame(Q = c("Q1(<0.667)", "Q2(0.667~0.769)", "Q3(1.3~1.5)", "Q4(>1.5)"), value = c(Q1, Q2, Q3, Q4))
+ggbarplot(q_dat, x = "Q", y = "value", fill = "Q", label = T, xlab = F, ylab = F,
+          width = 0.5) + rremove("x.text") + scale_y_continuous(limits = c(0, 1.1*max(q_dat$value)), expand = c(0, 0))
+```
+
+聚类方法:根据富集分析得到的费希尔精确检验P value使用层次聚类的方法将不同Q组中的相关功能聚到一起，绘制成热图(heatmap)。热图的横向为不同的Q组,纵向为差异表达蛋白富集到的相关功能（GO、KEGG pathway、Protein domain）的描述。不同Q 组与差异表达蛋白富集的功能描述对应的色块表示富集程度的强弱。红色代表富集程度强，蓝色代表富基程度弱。
+
+Biological Processes
+
+```{r BP-clustering, eval=TRUE, fig.align="center", include=TRUE}
+diffpros_q1 <- diff_dat_all[diff_dat_all$FC < 0.667 & diff_dat_all$p_value < 0.05,] %>% rownames()
+diffpros_q2 <- diff_dat_all[diff_dat_all$FC >= 0.667 & diff_dat_all$FC < 0.769 & diff_dat_all$p_value < 0.05,] %>% rownames()
+diffpros_q3 <- diff_dat_all[diff_dat_all$FC >= 1.3 & diff_dat_all$FC < 1.5 & diff_dat_all$p_value < 0.05,] %>% rownames()
+diffpros_q4 <- diff_dat_all[diff_dat_all$FC >= 1.5 & diff_dat_all$p_value < 0.05,] %>% rownames()
+
+ego_bp_q1 <- enricher(
+  diffpros_q1,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_bp[,1:2],
+  TERM2NAME = term2pro_bp[,c(1,4)]
+) %>% .@result
+
+ego_bp_q1$BgRatio <- sapply(ego_bp_q1$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_bp_q1$GeneRatio <- sapply(ego_bp_q1$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_bp_q1 <- ego_bp_q1 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_bp_q2 <- enricher(
+  diffpros_q2,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_bp[,1:2],
+  TERM2NAME = term2pro_bp[,c(1,4)]
+) %>% .@result
+
+ego_bp_q2$BgRatio <- sapply(ego_bp_q2$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_bp_q2$GeneRatio <- sapply(ego_bp_q2$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_bp_q2 <- ego_bp_q2 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_bp_q3 <- enricher(
+  diffpros_q3,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_bp[,1:2],
+  TERM2NAME = term2pro_bp[,c(1,4)]
+) %>% .@result
+
+ego_bp_q3$BgRatio <- sapply(ego_bp_q3$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_bp_q3$GeneRatio <- sapply(ego_bp_q3$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_bp_q3 <- ego_bp_q3 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_bp_q4 <- enricher(
+  diffpros_q4,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_bp[,1:2],
+  TERM2NAME = term2pro_bp[,c(1,4)]
+) %>% .@result
+
+ego_bp_q4$BgRatio <- sapply(ego_bp_q4$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_bp_q4$GeneRatio <- sapply(ego_bp_q4$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_bp_q4 <- ego_bp_q4 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05) 
+
+if (nrow(ego_bp_q1) > 10) ego_bp_q1 <- ego_bp_q1[1:10,]
+if (nrow(ego_bp_q2) > 10) ego_bp_q2 <- ego_bp_q2[1:10,]
+if (nrow(ego_bp_q3) > 10) ego_bp_q3 <- ego_bp_q3[1:10,]
+if (nrow(ego_bp_q4) > 10) ego_bp_q4 <- ego_bp_q4[1:10,]
+
+ht_dat <- full_join(ego_bp_q1, ego_bp_q2, by = "Description") %>% full_join(ego_bp_q3, by = "Description") %>% full_join(ego_bp_q4, by = "Description") %>% select(Description, starts_with("log2FoldEnrichment")) %>% dplyr::rename(Q1 = log2FoldEnrichment.x, Q2 = log2FoldEnrichment.y, Q3 = log2FoldEnrichment.x.x, Q4 = log2FoldEnrichment.y.y)
+
+ht_dat[is.na(ht_dat)] <- 0
+rownames(ht_dat) <- ht_dat$Description
+ht_dat <- t(scale(t(ht_dat[,-1])))
+ha <- HeatmapAnnotation(Q = colnames(ht_dat), col = list(Q = c("Q1" = "#E497FF", "Q2" = "#94CA02", "Q3" = "#F89786", "Q4" = "#05D7DF")))
+col_fun = colorRamp2(seq(min(ht_dat), max(ht_dat), length = 3), c("#4B7ABD", "#F9FEC3", "#DC3934"))
+Heatmap(ht_dat, name = " ", cluster_columns = F, show_column_names = F, show_row_names = T, rect_gp = gpar(col = "white", lwd = 1), top_annotation = ha, col = col_fun)
+```
+
+Cellular Component
+
+```{r CC-clustering, eval=TRUE, fig.align="center", include=TRUE}
+ego_cc_q1 <- enricher(
+  diffpros_q1,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_cc[,1:2],
+  TERM2NAME = term2pro_cc[,c(1,4)]
+) %>% .@result
+
+ego_cc_q1$BgRatio <- sapply(ego_cc_q1$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_cc_q1$GeneRatio <- sapply(ego_cc_q1$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_cc_q1 <- ego_cc_q1 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_cc_q2 <- enricher(
+  diffpros_q2,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_cc[,1:2],
+  TERM2NAME = term2pro_cc[,c(1,4)]
+) %>% .@result
+
+ego_cc_q2$BgRatio <- sapply(ego_cc_q2$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_cc_q2$GeneRatio <- sapply(ego_cc_q2$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_cc_q2 <- ego_cc_q2 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_cc_q3 <- enricher(
+  diffpros_q3,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_cc[,1:2],
+  TERM2NAME = term2pro_cc[,c(1,4)]
+) %>% .@result
+
+ego_cc_q3$BgRatio <- sapply(ego_cc_q3$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_cc_q3$GeneRatio <- sapply(ego_cc_q3$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_cc_q3 <- ego_cc_q3 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_cc_q4 <- enricher(
+  diffpros_q4,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_cc[,1:2],
+  TERM2NAME = term2pro_cc[,c(1,4)]
+) %>% .@result
+
+ego_cc_q4$BgRatio <- sapply(ego_cc_q4$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_cc_q4$GeneRatio <- sapply(ego_cc_q4$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_cc_q4 <- ego_cc_q4 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05) 
+
+if (nrow(ego_cc_q1) > 10) ego_cc_q1 <- ego_cc_q1[1:10,]
+if (nrow(ego_cc_q2) > 10) ego_cc_q2 <- ego_cc_q2[1:10,]
+if (nrow(ego_cc_q3) > 10) ego_cc_q3 <- ego_cc_q3[1:10,]
+if (nrow(ego_cc_q4) > 10) ego_cc_q4 <- ego_cc_q4[1:10,]
+
+ht_dat <- full_join(ego_cc_q1, ego_cc_q2, by = "Description") %>% full_join(ego_cc_q3, by = "Description") %>% full_join(ego_cc_q4, by = "Description") %>% select(Description, starts_with("log2FoldEnrichment")) %>% dplyr::rename(Q1 = log2FoldEnrichment.x, Q2 = log2FoldEnrichment.y, Q3 = log2FoldEnrichment.x.x, Q4 = log2FoldEnrichment.y.y)
+
+ht_dat[is.na(ht_dat)] <- 0
+rownames(ht_dat) <- ht_dat$Description
+ht_dat <- t(scale(t(ht_dat[,-1])))
+ha <- HeatmapAnnotation(Q = colnames(ht_dat), col = list(Q = c("Q1" = "#E497FF", "Q2" = "#94CA02", "Q3" = "#F89786", "Q4" = "#05D7DF")))
+col_fun = colorRamp2(seq(min(ht_dat), max(ht_dat), length = 3), c("#4B7ABD", "#F9FEC3", "#DC3934"))
+Heatmap(ht_dat, name = " ", cluster_columns = F, show_column_names = F, show_row_names = T, rect_gp = gpar(col = "white", lwd = 1), top_annotation = ha, col = col_fun, width = unit(4, "cm"), height = unit(nrow(ht_dat)/1.5, "cm"))
+```
+
+Molecular Function
+
+```{r MF-clustering, eval=TRUE, fig.align="center", include=TRUE}
+ego_mf_q1 <- enricher(
+  diffpros_q1,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_mf[,1:2],
+  TERM2NAME = term2pro_mf[,c(1,4)]
+) %>% .@result
+
+ego_mf_q1$BgRatio <- sapply(ego_mf_q1$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_mf_q1$GeneRatio <- sapply(ego_mf_q1$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_mf_q1 <- ego_mf_q1 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_mf_q2 <- enricher(
+  diffpros_q2,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_mf[,1:2],
+  TERM2NAME = term2pro_mf[,c(1,4)]
+) %>% .@result
+
+ego_mf_q2$BgRatio <- sapply(ego_mf_q2$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_mf_q2$GeneRatio <- sapply(ego_mf_q2$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_mf_q2 <- ego_mf_q2 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_mf_q3 <- enricher(
+  diffpros_q3,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_mf[,1:2],
+  TERM2NAME = term2pro_mf[,c(1,4)]
+) %>% .@result
+
+ego_mf_q3$BgRatio <- sapply(ego_mf_q3$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_mf_q3$GeneRatio <- sapply(ego_mf_q3$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_mf_q3 <- ego_mf_q3 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+ego_mf_q4 <- enricher(
+  diffpros_q4,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = term2pro_mf[,1:2],
+  TERM2NAME = term2pro_mf[,c(1,4)]
+) %>% .@result
+
+ego_mf_q4$BgRatio <- sapply(ego_mf_q4$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_mf_q4$GeneRatio <- sapply(ego_mf_q4$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+ego_mf_q4 <- ego_mf_q4 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05) 
+
+if (nrow(ego_mf_q1) > 10) ego_mf_q1 <- ego_mf_q1[1:10,]
+if (nrow(ego_mf_q2) > 10) ego_mf_q2 <- ego_mf_q2[1:10,]
+if (nrow(ego_mf_q3) > 10) ego_mf_q3 <- ego_mf_q3[1:10,]
+if (nrow(ego_mf_q4) > 10) ego_mf_q4 <- ego_mf_q4[1:10,]
+
+ht_dat <- full_join(ego_mf_q1, ego_mf_q2, by = "Description") %>% full_join(ego_mf_q3, by = "Description") %>% full_join(ego_mf_q4, by = "Description") %>% select(Description, starts_with("log2FoldEnrichment")) %>% dplyr::rename(Q1 = log2FoldEnrichment.x, Q2 = log2FoldEnrichment.y, Q3 = log2FoldEnrichment.x.x, Q4 = log2FoldEnrichment.y.y)
+
+ht_dat[is.na(ht_dat)] <- 0
+rownames(ht_dat) <- ht_dat$Description
+ht_dat <- t(scale(t(ht_dat[,-1])))
+ha <- HeatmapAnnotation(Q = colnames(ht_dat), col = list(Q = c("Q1" = "#E497FF", "Q2" = "#94CA02", "Q3" = "#F89786", "Q4" = "#05D7DF")))
+col_fun = colorRamp2(seq(min(ht_dat), max(ht_dat), length = 3), c("#4B7ABD", "#F9FEC3", "#DC3934"))
+Heatmap(ht_dat, name = " ", cluster_columns = F, show_column_names = F, show_row_names = T, rect_gp = gpar(col = "white", lwd = 1), top_annotation = ha, col = col_fun)
+```
+
+KEGG Pathway
+
+```{r KEGG-pathways-clustering, eval=TRUE, fig.align="center", include=TRUE}
+kegg_q1 <- enricher(
+  diffpros_q1,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = kegg_pathway2pro,
+  # TERM2NAME = kegg2pro[,c(1,4)]
+) %>% .@result
+
+kegg_q1$BgRatio <- sapply(kegg_q1$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_q1$GeneRatio <- sapply(kegg_q1$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_q1 <- kegg_q1 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+kegg_q2 <- enricher(
+  diffpros_q2,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = kegg_pathway2pro,
+  # TERM2NAME = kegg2pro[,c(1,4)]
+) %>% .@result
+
+kegg_q2$BgRatio <- sapply(kegg_q2$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_q2$GeneRatio <- sapply(kegg_q2$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_q2 <- kegg_q2 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+kegg_q3 <- enricher(
+  diffpros_q3,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = kegg_pathway2pro,
+  # TERM2NAME = kegg2pro[,c(1,4)]
+) %>% .@result
+
+kegg_q3$BgRatio <- sapply(kegg_q3$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_q3$GeneRatio <- sapply(kegg_q3$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_q3 <- kegg_q3 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+kegg_q4 <- enricher(
+  diffpros_q4,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = kegg_pathway2pro,
+  # TERM2NAME = kegg2pro[,c(1,4)]
+) %>% .@result
+
+kegg_q4$BgRatio <- sapply(kegg_q4$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_q4$GeneRatio <- sapply(kegg_q4$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+kegg_q4 <- kegg_q4 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+if (nrow(kegg_q1) > 10) kegg_q1 <- kegg_q1[1:10,]
+if (nrow(kegg_q2) > 10) kegg_q2 <- kegg_q2[1:10,]
+if (nrow(kegg_q3) > 10) kegg_q3 <- kegg_q3[1:10,]
+if (nrow(kegg_q4) > 10) kegg_q4 <- kegg_q4[1:10,]
+
+ht_dat <- full_join(kegg_q1, kegg_q2, by = "Description") %>% full_join(kegg_q3, by = "Description") %>% full_join(kegg_q4, by = "Description") %>% select(Description, starts_with("log2FoldEnrichment")) %>% dplyr::rename(Q1 = log2FoldEnrichment.x, Q2 = log2FoldEnrichment.y, Q3 = log2FoldEnrichment.x.x, Q4 = log2FoldEnrichment.y.y)
+
+ht_dat$ID <- str_replace(ht_dat$Description, pattern = "ko", replacement = "hsa")
+ht_dat <- left_join(ht_dat, kegg_info, by = "ID") %>%
+  dplyr::filter(!is.na(level4_description))
+ht_dat$level4_description <- str_c(ht_dat$ID, ht_dat$level4_description, sep = " ")
+
+ht_dat[is.na(ht_dat)] <- 0
+rownames(ht_dat) <- ht_dat$level4_description
+ht_dat <- ht_dat %>% dplyr::select(Q1, Q2, Q3, Q4)
+ht_dat <- t(scale(t(ht_dat)))
+ha <- HeatmapAnnotation(Q = colnames(ht_dat), col = list(Q = c("Q1" = "#E497FF", "Q2" = "#94CA02", "Q3" = "#F89786", "Q4" = "#05D7DF")))
+col_fun = colorRamp2(seq(min(ht_dat), max(ht_dat), length = 3), c("#4B7ABD", "#F9FEC3", "#DC3934"))
+Heatmap(ht_dat, name = "zscore", cluster_columns = F, show_column_names = F, show_row_names = T, rect_gp = gpar(col = "white", lwd = 1), top_annotation = ha, col = col_fun)
+```
+
+Protein Domain
+
+```{r protein-loci-clustering, eval=TRUE, fig.align="center", include=TRUE, out.width="80%"}
+pfam_q1 <- enricher(
+  diffpros_q1,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = pfam2pro
+) %>% .@result
+
+pfam_q2 <- enricher(
+  diffpros_q2,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = pfam2pro
+) %>% .@result
+
+pfam_q3 <- enricher(
+  diffpros_q3,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = pfam2pro
+) %>% .@result
+
+pfam_q4 <- enricher(
+  diffpros_q4,
+  pAdjustMethod = "BH", 
+  universe = annotation$query,
+  TERM2GENE = pfam2pro
+) %>% .@result
+
+pfam_q1$BgRatio <- sapply(pfam_q1$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_q1$GeneRatio <- sapply(pfam_q1$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_q1 <- pfam_q1 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+pfam_q2$BgRatio <- sapply(pfam_q2$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_q2$GeneRatio <- sapply(pfam_q2$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_q2 <- pfam_q2 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+pfam_q3$BgRatio <- sapply(pfam_q3$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_q3$GeneRatio <- sapply(pfam_q3$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_q3 <- pfam_q3 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+pfam_q4$BgRatio <- sapply(pfam_q4$BgRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_q4$GeneRatio <- sapply(pfam_q4$GeneRatio, function(x){eval(parse(text = x))}) %>% unname()
+pfam_q4 <- pfam_q4 %>% dplyr::mutate(log2FoldEnrichment = log2(GeneRatio/BgRatio)) %>% filter(pvalue < 0.05)
+
+if (nrow(pfam_q1) > 10) pfam_q1 <- pfam_q1[1:10,]
+if (nrow(pfam_q2) > 10) pfam_q2 <- pfam_q2[1:10,]
+if (nrow(pfam_q3) > 10) pfam_q3 <- pfam_q3[1:10,]
+if (nrow(pfam_q4) > 10) pfam_q4 <- pfam_q4[1:10,]
+
+ht_dat <- full_join(pfam_q1, pfam_q2, by = "Description") %>% full_join(pfam_q3, by = "Description") %>% full_join(pfam_q4, by = "Description") %>% select(Description, starts_with("log2FoldEnrichment")) %>% dplyr::rename(Q1 = log2FoldEnrichment.x, Q2 = log2FoldEnrichment.y, Q3 = log2FoldEnrichment.x.x, Q4 = log2FoldEnrichment.y.y)
+
+ht_dat[is.na(ht_dat)] <- 0
+rownames(ht_dat) <- ht_dat$Description
+ht_dat <- t(scale(t(ht_dat[,-1])))
+ha <- HeatmapAnnotation(Q = colnames(ht_dat), col = list(Q = c("Q1" = "#E497FF", "Q2" = "#94CA02", "Q3" = "#F89786", "Q4" = "#05D7DF")))
+col_fun = colorRamp2(seq(min(ht_dat), max(ht_dat), length = 3), c("#4B7ABD", "#F9FEC3", "#DC3934"))
+Heatmap(ht_dat, name = " ", cluster_columns = F, show_column_names = F, show_row_names = T, rect_gp = gpar(col = "white", lwd = 1), top_annotation = ha, col = col_fun)
+```
+
